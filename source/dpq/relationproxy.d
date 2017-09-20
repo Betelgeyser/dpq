@@ -121,8 +121,17 @@ struct RelationProxy(T)
 	{
 		_connection = connection;
 	}
-
-
+	
+	@property void connection(ref Connection connection)
+	{
+		_markStale();
+		_connection = connection;
+	}
+	
+	@property ref Connection connection()
+	{
+		return _connection;
+	}
 	/**
 		Makes a copy of just the filters, not any content;
 	 */
@@ -149,14 +158,9 @@ struct RelationProxy(T)
 	 */
 	@property T[] all()
 	{
-		// Update the content if it's not currently fresh or has not been fetched yet
-		if (!_contentFresh)
-		{
-			_updateContent();
-			_sortedBy = "";
-		}
+		auto result = _queryBuilder.query(_connection).run();
 
-		return _content;
+		return result.map!(deserialise!T).array;
 	}
 
 	alias all this;
@@ -178,18 +182,9 @@ struct RelationProxy(T)
 	 */
 	@property T[] fetch(int limit = -1)
 	{
-		if (!_contentFresh)
-		{
-			_updateContent();
-			_sortedBy = "";
-		}
+		auto result = _queryBuilder.limit(limit).query(_connection).run();
 
-		if (limit <= -1)
-			return _content;
-		if (limit >= 1)
-			return _content[0 .. limit.clamp(1, _content.length)];
-
-		return T[].init;
+		return result.map!(deserialise!T).array;
 	}
 
 	/**
@@ -214,7 +209,7 @@ struct RelationProxy(T)
 		_queryBuilder.where(filter, params);
 		return this;
 	}
-
+	
 	/**
 		Convenience alias, allows us to do proxy.where(..).and(...)
 	 */
@@ -255,19 +250,7 @@ struct RelationProxy(T)
 	{
 		alias RT = Nullable!T;
 
-		// If the content is fresh, we do not have to fetch anything
-		if (_contentFresh && _sortedBy == primaryKeyAttributeName!T)
-		{
-			if (_content.length == 0)
-				return RT.init;
-			return RT(_content[0]);
-		}
-
-		// Make a copy of the builder, as to not ruin the query in case of reuse
-		auto qb = _queryBuilder;
-		qb.limit(1).order(primaryKeyAttributeName!T, Order.asc);
-
-		auto result = qb.query(_connection).run();
+		auto result = _queryBuilder.limit(1).order(primaryKeyAttributeName!T, Order.asc).query(_connection).run();
 
 		if (result.rows == 0)
 			return RT.init;
@@ -302,21 +285,10 @@ struct RelationProxy(T)
 	{
 		if (limit == 0)
 			return T[].init;
-
-		if (!_contentFresh || _sortedBy != by)
-		{
-			auto qb = _queryBuilder;
-			qb.order(by, Order.asc);
-			auto result = qb.query(_connection).run();
-			_content = result.map!(deserialise!T).array;
-			_markFresh();
-			_sortedBy = by;
-		}
-
-		if (limit <= -1)
-			return _content;
-
-		return _content[0 .. limit.clamp(1, _content.length)];
+		
+		auto result = _queryBuilder.limit(limit).order(by, Order.asc).query(_connection).run();
+		
+		return result.map!(deserialise!T).array;
 	}
 
 	/// ditto
@@ -334,19 +306,7 @@ struct RelationProxy(T)
 	{
 		alias RT = Nullable!T;
 
-		// If the content is fresh, we do not have to fetch anything
-		if (_contentFresh && _sortedBy == primaryKeyAttributeName!T)
-		{
-			if (_content.length == 0)
-				return RT.init;
-			return RT(_content[$ - 1]);
-		}
-
-		// Make a copy of the builder, as to not ruin the query in case of reuse
-		auto qb = _queryBuilder;
-		qb.limit(1).order(primaryKeyAttributeName!T, Order.desc);
-
-		auto result = qb.query(_connection).run();
+		auto result = _queryBuilder.limit(1).order(primaryKeyAttributeName!T, Order.desc).query(_connection).run();
 
 		if (result.rows == 0)
 			return RT.init;
@@ -369,26 +329,8 @@ struct RelationProxy(T)
 		if (limit == 0)
 			return T[].init;
 
-		if (!_contentFresh || _sortedBy != by)
-		{
-			auto qb = _queryBuilder;
-			qb.order(by, Order.asc); // Yes, ASC. We will reverse it later
-			auto result = qb.query(_connection).run();
-			_content = result.map!(deserialise!T).array;
-			_markFresh();
-			_sortedBy = by;
-		}
-
-		if (limit <= -1)
-		{
-			auto result = _content.dup;
-			reverse(result);
-			return result;
-		}
-
-		auto result = _content[_content.length - limit.clamp(1, _content.length) .. $].dup;
-		reverse(result);
-		return result;
+		auto result = _queryBuilder.order(by, Order.desc).limit(limit).query(_connection).run();
+		return result.map!(deserialise!T).array;
 	}
 
 	/// ditto
@@ -522,7 +464,7 @@ struct RelationProxy(T)
 
 		return record;
 	}
-
+	
 	/**
 		Updates the given record in the DB with all the current values.
 

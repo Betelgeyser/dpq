@@ -1,7 +1,7 @@
 ///
 module dpq.mixins;
 
-import dpq.relationproxy;
+public import dpq.relationproxy;
 import std.typecons : Nullable;
 
 /**
@@ -31,12 +31,33 @@ mixin template RelationMixin()
 	alias Type = typeof(this);
 	alias ProxyT = RelationProxy!Type;
 
-	import dpq.connection : _dpqLastConnection;
+	import dpq.connection : Connection;
 	import std.typecons : Nullable;
 
+	@ignore static Connection _connection;
+	
 	@property static ProxyT relationProxy()
 	{
-		return ProxyT(*_dpqLastConnection);
+		import dpq.exception;
+		if (_connection.isNull)
+			throw new DPQException(Type.stringof ~ " db connection is null.");
+		
+		return ProxyT(_connection);
+	}
+	
+	static ProxyT connection(ref Connection conn)
+	{
+		import dpq.exception;
+		if (conn.isNull)
+			throw new DPQException(Type.stringof ~ ".connect() called on null connection.");
+		
+		return ProxyT(conn);
+	}
+	
+	static ProxyT connect(ref Connection conn)
+	{
+		_connection = conn;
+		return relationProxy;
 	}
 
 	static ProxyT where(U)(U[string] filters)
@@ -48,7 +69,7 @@ mixin template RelationMixin()
 	{
 		return relationProxy.where(filter, params);
 	}
-
+	
 	static Type find(U)(U param)
 	{
 		return relationProxy.find(param);
@@ -104,3 +125,4 @@ mixin template RelationMixin()
 		return relationProxy.count(col);
 	}
 }
+

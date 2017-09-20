@@ -121,6 +121,11 @@ struct Connection
 	{
 		return PQport(_connection).fromStringz.to!ushort;
 	}
+	
+	@property const(bool) isNull()
+	{
+		return _connection is null;
+	}
 
 	/**
 		Executes the given string directly

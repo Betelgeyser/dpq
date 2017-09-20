@@ -354,7 +354,7 @@ struct QueryBuilder
 
 		return this;
 	}
-
+	
 	/// Alias and to where, to allow stuff like User.where( ... ).and( ... )
 	alias and = where;
 
