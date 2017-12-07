@@ -6,7 +6,7 @@ import dpq.querybuilder;
 import dpq.value : Value;
 public import dpq.querybuilder : RowLock;
 
-import std.algorithm : map, clamp, reverse;
+import std.algorithm : map;
 import std.array;
 import std.meta : Alias;
 import std.typecons : Nullable;
@@ -79,7 +79,6 @@ struct RelationProxy(T)
 			fresh once any filters change or new ones are applied. 
 		 */
 		bool _contentFresh = false;
-		string _sortedBy = "";
 
 		/**
 			Update the content, does not check for freshness
@@ -146,30 +145,26 @@ struct RelationProxy(T)
 	{
 		// Update the content if it's not currently fresh or has not been fetched yet
 		if (!_contentFresh)
-		{
 			_updateContent();
-			_sortedBy = "";
-		}
 
 		return _content;
 	}
 
 	alias all this;
 
-	@property T[] fetch(int limit = -1)
+	@property T[] limit(int limit)
 	{
-		if (!_contentFresh)
-		{
-			_updateContent();
-			_sortedBy = "";
-		}
+		_queryBuilder.limit(limit);
+		_updateContent();
 
-		if (limit <= -1)
-			return _content;
-		if (limit >= 1)
-			return _content[0 .. limit.clamp(1, _content.length)];
+		return _content;
+	}
 
-		return T[].init;
+	ref auto order(string col, Order order)
+	{
+		_markStale();
+		_queryBuilder.order(col, order);
+		return this;
 	}
 
 	/**
@@ -241,7 +236,7 @@ struct RelationProxy(T)
 		alias RT = Nullable!T;
 
 		// If the content is fresh, we do not have to fetch anything
-		if (_contentFresh && _sortedBy == primaryKeyAttributeName!T)
+		if (_contentFresh)
 		{
 			if (_content.length == 0)
 				return RT.init;
@@ -260,32 +255,6 @@ struct RelationProxy(T)
 		return RT(result[0].deserialise!T);
 	}
 
-	@property T[] first(string by, int limit = 1)
-	{
-		if (limit == 0)
-			return T[].init;
-
-		if (!_contentFresh || _sortedBy != by)
-		{
-			auto qb = _queryBuilder;
-			qb.order(by, Order.asc);
-			auto result = qb.query(_connection).run();
-			_content = result.map!(deserialise!T).array;
-			_markFresh();
-			_sortedBy = by;
-		}
-
-		if (limit <= -1)
-			return _content;
-
-		return _content[0 .. limit.clamp(1, _content.length)];
-	}
-
-	@property T[] first(int limit, string by = primaryKeyAttributeName!T)
-	{
-		return first(by, limit);
-	}
-
 	/**
 		Same as first, but defaults to desceding order, giving you the last match.
 
@@ -296,7 +265,7 @@ struct RelationProxy(T)
 		alias RT = Nullable!T;
 
 		// If the content is fresh, we do not have to fetch anything
-		if (_contentFresh && _sortedBy == primaryKeyAttributeName!T)
+		if (_contentFresh)
 		{
 			if (_content.length == 0)
 				return RT.init;
@@ -313,38 +282,6 @@ struct RelationProxy(T)
 			return RT.init;
 		
 		return RT(result[result.rows - 1].deserialise!T);
-	}
-
-	@property T[] last(string by, int limit = 1)
-	{
-		if (limit == 0)
-			return T[].init;
-
-		if (!_contentFresh || _sortedBy != by)
-		{
-			auto qb = _queryBuilder;
-			qb.order(by, Order.asc); // Yes, ASC. We will reverse it later
-			auto result = qb.query(_connection).run();
-			_content = result.map!(deserialise!T).array;
-			_markFresh();
-			_sortedBy = by;
-		}
-
-		if (limit <= -1)
-		{
-			auto result = _content.dup;
-			reverse(result);
-			return result;
-		}
-
-		auto result = _content[_content.length - limit.clamp(1, _content.length) .. $].dup;
-		reverse(result);
-		return result;
-	}
-
-	@property T[] last(int limit, string by = primaryKeyAttributeName!T)
-	{
-		return last(by, limit);
 	}
 
 	@property ref auto for_(RowLock lock)
@@ -598,81 +535,3 @@ bool save(T)(T record)
 	return T.saveRecord(record);
 }
 
-// Have to move unittest out of the RelationProxy scope due to recursive expansion
-unittest
-{
-	import std.stdio;
-
-	writeln(" * RelationProxy");
-
-	import std.algorithm : equal, all;
-
-	@relation("test")
-	struct Test
-	{
-		@serial @PK int id;
-		int data;
-	}
-
-	c.ensureSchema!Test;
-
-	Test[] t;
-	t ~= Test();
-	t[0].data = 789;
-	t ~= Test();
-	t[1].data = 123;
-	t ~= Test();
-	t[2].data = 456;
-
-	c.insert(t);
-
-	auto rp = RelationProxy!Test(c);
-
-	writeln("\t * first");
-	assert(rp.first.data               == 789);
-	assert(rp.first(2)[1].data         == 123);
-	assert(rp.first(2, "data")[0].data == 123);
-	assert(rp.first(-1)[0].data        == 789);
-
-	assert(equal(rp.first(2, "data"), rp.first("data", 2)));
-	assert([
-			rp.first(1)[0].data,
-			rp.first("id")[0].data,
-			rp.first(1, "id")[0].data
-		]
-		.all!(x => x == rp.first.data)
-	);
-
-	assert(rp.first(-2).length == 3);
-	assert(rp.first( 0).length == 0);
-	assert(rp.first( 2).length == 2);
-	assert(rp.first( 5).length == 3);
-
-	writeln("\t * last");
-	assert(rp.last.data               == 456);
-	assert(rp.last(2)[1].data         == 123);
-	assert(rp.last(2, "data")[0].data == 789);
-	assert(rp.last(-1)[0].data        == 456);
-
-	assert(equal(rp.last(2, "data"), rp.last("data", 2)));
-	assert([
-			rp.last(1)[0].data,
-			rp.last("id")[0].data,
-			rp.last(1, "id")[0].data
-		]
-		.all!(x => x == rp.last.data)
-	);
-
-	assert(rp.last(-2).length == 3);
-	assert(rp.last( 0).length == 0);
-	assert(rp.last( 2).length == 2);
-	assert(rp.last( 5).length == 3);
-
-	writeln("\t * fetch");
-	assert(rp.fetch(  ).length == 3);
-	assert(rp.fetch(-1).length == 3);
-	assert(rp.fetch( 0).length == 0);
-	assert(rp.fetch( 2).length == 2);
-
-	c.exec("DROP TABLE test;");
-}
