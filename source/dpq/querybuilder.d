@@ -354,7 +354,7 @@ struct QueryBuilder
 
 		return this;
 	}
-	
+
 	/// Alias and to where, to allow stuff like User.where( ... ).and( ... )
 	alias and = where;
 
@@ -460,7 +460,7 @@ struct QueryBuilder
 	}
 
 	/// Row-level locking
-	ref QueryBuilder for_(RowLock lock)
+	ref QueryBuilder lock(RowLock lock)
 	{
 		assert(_type == QueryType.select, "QueryBuilder.for_() can only be used on SELECT queries.");
 		_rowLock = lock;

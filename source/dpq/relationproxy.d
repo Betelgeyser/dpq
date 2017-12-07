@@ -4,9 +4,9 @@ import dpq.attributes;
 import dpq.connection;
 import dpq.querybuilder;
 import dpq.value : Value;
-public import dpq.querybuilder : RowLock;
+import dpq.querybuilder : RowLock;
 
-import std.algorithm : map, clamp, reverse;
+import std.algorithm : map;
 import std.array;
 import std.meta : Alias;
 import std.typecons : Nullable;
@@ -81,12 +81,6 @@ struct RelationProxy(T)
 		bool _contentFresh = false;
 
 		/**
-			Tracks which column is the content sorted by. Empty string means that
-			the content is not guaranteed to be sorted.
-		 */
-		string _sortedBy = "";
-
-		/**
 			Update the content, does not check for freshness
 		 */
 		void _updateContent()
@@ -158,34 +152,14 @@ struct RelationProxy(T)
 	 */
 	@property T[] all()
 	{
-		auto result = _queryBuilder.query(_connection).run();
+		// Update the content if it's not currently fresh or has not been fetched yet
+		if (!_contentFresh)
+			_updateContent();
 
-		return result.map!(deserialise!T).array;
+		return _content;
 	}
 
 	alias all this;
-
-	/**
-		Returns the actual content, executing the query if data has not yet been
-		fetched from the database limited by limit rows.
-
-		Params:
-			limit = number of rows to return. If set to any negative value, then
-			all rows will be returned. That is the default behavior.
-
-		Note:
-			In its current implementation this function will fetch all rows
-			satisfying filters and cache them. Limit parameter affects how
-			many rows will actually be returned from cache.
-
-			Does not guarantee order of returned rows.
-	 */
-	@property T[] fetch(int limit = -1)
-	{
-		auto result = _queryBuilder.limit(limit).query(_connection).run();
-
-		return result.map!(deserialise!T).array;
-	}
 
 	/**
 		Specifies filters according to the given AA. 
@@ -209,7 +183,7 @@ struct RelationProxy(T)
 		_queryBuilder.where(filter, params);
 		return this;
 	}
-	
+
 	/**
 		Convenience alias, allows us to do proxy.where(..).and(...)
 	 */
@@ -250,51 +224,24 @@ struct RelationProxy(T)
 	{
 		alias RT = Nullable!T;
 
-		auto result = _queryBuilder.limit(1).order(primaryKeyAttributeName!T, Order.asc).query(_connection).run();
+		// If the content is fresh, we do not have to fetch anything
+		if (_contentFresh)
+		{
+			if (_content.length == 0)
+				return RT.init;
+			return RT(_content[0]);
+		}
+
+		// Make a copy of the builder, as to not ruin the query in case of reuse
+		auto qb = _queryBuilder;
+		qb.limit(1).order(primaryKeyAttributeName!T, Order.asc);
+
+		auto result = qb.query(_connection).run();
 
 		if (result.rows == 0)
 			return RT.init;
 		
 		return RT(result[0].deserialise!T);
-	}
-
-	/**
-		Fetches first limit records matching the filters.
-
-		Will return an empty array if no matches.
-
-		If data is already cached, not marked stale/unfresh and ordered by specified
-		column, it will reuse it, meaning that calling this after calling all
-		will not generate an additional query, even if called multiple times.
-		Will not cache its own result, only reuse existing data.
-
-		Params:
-			by = specifies the column to order by, defaults to PK name.
-			limit = specifies how many rows to return, defaults to 1.
-			If set to negative value, all matching rows will be returned.
-
-		Example:
-		-----------------
-		auto p = RelationProxy!User();
-		auto users = p.where(["something": 123]).first(5);
-		auto users = p.first("RegistrationDate");
-		auto users = p.first("RegistrationDate", 10);
-		-----------------
-	 */
-	@property T[] first(string by, int limit = 1)
-	{
-		if (limit == 0)
-			return T[].init;
-		
-		auto result = _queryBuilder.limit(limit).order(by, Order.asc).query(_connection).run();
-		
-		return result.map!(deserialise!T).array;
-	}
-
-	/// ditto
-	@property T[] first(int limit, string by = primaryKeyAttributeName!T)
-	{
-		return first(by, limit);
 	}
 
 	/**
@@ -306,7 +253,19 @@ struct RelationProxy(T)
 	{
 		alias RT = Nullable!T;
 
-		auto result = _queryBuilder.limit(1).order(primaryKeyAttributeName!T, Order.desc).query(_connection).run();
+		// If the content is fresh, we do not have to fetch anything
+		if (_contentFresh)
+		{
+			if (_content.length == 0)
+				return RT.init;
+			return RT(_content[$ - 1]);
+		}
+
+		// Make a copy of the builder, as to not ruin the query in case of reuse
+		auto qb = _queryBuilder;
+		qb.limit(1).order(primaryKeyAttributeName!T, Order.desc);
+
+		auto result = qb.query(_connection).run();
 
 		if (result.rows == 0)
 			return RT.init;
@@ -315,37 +274,12 @@ struct RelationProxy(T)
 	}
 
 	/**
-		Same as first(by, limit), but defaults to desceding order, giving you the last match.
-
-		Caching acts the same as with first.
-
-		Note:
-			Actually this function uses ascending order internally and simply reverses it.
-			This behavior is intentional and used to prevent additinal query to a database
-			to change the order.
-	 */
-	@property T[] last(string by, int limit = 1)
-	{
-		if (limit == 0)
-			return T[].init;
-
-		auto result = _queryBuilder.order(by, Order.desc).limit(limit).query(_connection).run();
-		return result.map!(deserialise!T).array;
-	}
-
-	/// ditto
-	@property T[] last(int limit, string by = primaryKeyAttributeName!T)
-	{
-		return last(by, limit);
-	}
-
-	/**
 		Sets explicit row-level lock on returned rows.
 	 */
-	@property ref auto for_(RowLock lock)
+	@property ref auto lock(RowLock lock)
 	{
 		_markStale();
-		_queryBuilder.for_(lock);
+		_queryBuilder.lock(lock);
 		return this;
 	}
 
@@ -464,7 +398,7 @@ struct RelationProxy(T)
 
 		return record;
 	}
-	
+
 	/**
 		Updates the given record in the DB with all the current values.
 
@@ -591,83 +525,4 @@ bool save(T)(T record)
 	if (IsValidRelation!T)
 {
 	return T.saveRecord(record);
-}
-
-// Have to move unittest out of the RelationProxy scope due to recursive expansion
-unittest
-{
-	import std.stdio;
-
-	writeln(" * RelationProxy");
-
-	import std.algorithm : equal, all;
-
-	@relation("test")
-	struct Test
-	{
-		@serial @PK int id;
-		int data;
-	}
-
-	c.ensureSchema!Test;
-
-	Test[] t;
-	t ~= Test();
-	t[0].data = 789;
-	t ~= Test();
-	t[1].data = 123;
-	t ~= Test();
-	t[2].data = 456;
-
-	c.insert(t);
-
-	auto rp = RelationProxy!Test(c);
-
-	writeln("\t * first");
-	assert(rp.first.data               == 789);
-	assert(rp.first(2)[1].data         == 123);
-	assert(rp.first(2, "data")[0].data == 123);
-	assert(rp.first(-1)[0].data        == 789);
-
-	assert(equal(rp.first(2, "data"), rp.first("data", 2)));
-	assert([
-			rp.first(1)[0].data,
-			rp.first("id")[0].data,
-			rp.first(1, "id")[0].data
-		]
-		.all!(x => x == rp.first.data)
-	);
-
-	assert(rp.first(-2).length == 3);
-	assert(rp.first( 0).length == 0);
-	assert(rp.first( 2).length == 2);
-	assert(rp.first( 5).length == 3);
-
-	writeln("\t * last");
-	assert(rp.last.data               == 456);
-	assert(rp.last(2)[1].data         == 123);
-	assert(rp.last(2, "data")[0].data == 789);
-	assert(rp.last(-1)[0].data        == 456);
-
-	assert(equal(rp.last(2, "data"), rp.last("data", 2)));
-	assert([
-			rp.last(1)[0].data,
-			rp.last("id")[0].data,
-			rp.last(1, "id")[0].data
-		]
-		.all!(x => x == rp.last.data)
-	);
-
-	assert(rp.last(-2).length == 3);
-	assert(rp.last( 0).length == 0);
-	assert(rp.last( 2).length == 2);
-	assert(rp.last( 5).length == 3);
-
-	writeln("\t * fetch");
-	assert(rp.fetch(  ).length == 3);
-	assert(rp.fetch(-1).length == 3);
-	assert(rp.fetch( 0).length == 0);
-	assert(rp.fetch( 2).length == 2);
-
-	c.exec("DROP TABLE test;");
 }
