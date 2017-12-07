@@ -161,6 +161,21 @@ struct RelationProxy(T)
 
 	alias all this;
 
+	@property T[] limit(int limit)
+	{
+		_queryBuilder.limit(limit);
+		_updateContent();
+
+		return _content;
+	}
+
+	ref auto order(string col, Order order)
+	{
+		_markStale();
+		_queryBuilder.order(col, order);
+		return this;
+	}
+
 	/**
 		Specifies filters according to the given AA. 
 		Filters will be joined with AND.

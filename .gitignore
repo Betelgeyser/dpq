@@ -9,3 +9,6 @@ dub.userprefs
 __test__library__
 *.kate-swp
 *.swp
+
+# Eclipse project
+.project
