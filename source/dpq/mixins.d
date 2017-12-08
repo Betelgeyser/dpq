@@ -33,6 +33,7 @@ mixin template RelationMixin()
 
 	import dpq.connection : Connection;
 	import std.typecons : Nullable;
+	import std.traits : isArray;
 
 	@ignore static Connection _connection;
 	
@@ -80,9 +81,16 @@ mixin template RelationMixin()
 		return relationProxy.findBy(filters);
 	}
 
-	static ref Type insert(ref Type record)
+	static ref Type insert(T)(ref Type record)
+		if (!isArray!T)
 	{
 		return relationProxy.insert(record);	
+	}
+
+	static Type insert(T)(Type records)
+		if (isArray!T)
+	{
+		return relationProxy.insert(records);	
 	}
 
 	@property static Nullable!Type first()

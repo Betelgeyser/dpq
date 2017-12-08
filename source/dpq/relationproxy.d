@@ -5,11 +5,12 @@ import dpq.connection;
 import dpq.querybuilder;
 import dpq.value : Value;
 import dpq.querybuilder : RowLock;
+import dpq.meta : BaseType;
 
 import std.algorithm : map;
 import std.array;
-import std.meta : Alias;
 import std.typecons : Nullable;
+import std.traits : isArray;
 
 /**
 	 Verifies that the given type can be used a relation
@@ -395,7 +396,8 @@ struct RelationProxy(T)
 		an insert without the PK and can therefore be used to insert the same 
 		record multiple times.
 	 */
-	ref T insert(ref T record)
+	ref T insert(T)(ref T record)
+		if(!isArray!T)
 	{
 		_markStale();
 
@@ -407,11 +409,37 @@ struct RelationProxy(T)
 				.returning(pkAttr)
 				.addValues!T(record);
 
-		alias pkMem = Alias!(__traits(getMember, record, pk));
+		alias pkType = typeof(__traits(getMember, record, pk));
 		auto result = qb.query(_connection).run();
-		__traits(getMember, record, pk) = result[0][pkAttr].as!(typeof(pkMem));
+		__traits(getMember, record, pk) = result[0][pkAttr].as!(pkType);
 
 		return record;
+	}
+
+	T insert(T)(T records)
+		if(isArray!T)
+	{
+		_markStale();
+
+		alias BT = BaseType!T;
+
+		enum pk = primaryKeyName!BT;
+		enum pkAttr = primaryKeyAttributeName!BT;
+
+		auto qb = QueryBuilder()
+				.insert(relationName!BT, AttributeList!(BT, true, true))
+				.returning(pkAttr);
+
+		foreach(rec; records)
+			qb = qb.addValues!BT(rec);
+
+		alias pkType = typeof(__traits(getMember, records[0], pk));
+		auto result = qb.query(_connection).run();
+
+		foreach(i, res; result)
+			__traits(getMember, records[i], pk) = res[pkAttr].as!(pkType);
+
+		return records;
 	}
 
 	/**
