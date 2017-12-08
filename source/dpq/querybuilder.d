@@ -462,7 +462,7 @@ struct QueryBuilder
 	/// Row-level locking
 	ref QueryBuilder lock(RowLock lock)
 	{
-		assert(_type == QueryType.select, "QueryBuilder.for_() can only be used on SELECT queries.");
+		assert(_type == QueryType.select, "QueryBuilder.lock() can only be used on SELECT queries.");
 		_rowLock = lock;
 		return this;
 	}
