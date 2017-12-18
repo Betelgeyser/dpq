@@ -81,14 +81,12 @@ mixin template RelationMixin()
 		return relationProxy.findBy(filters);
 	}
 
-	static ref Type insert(T)(ref Type record)
-		if (!isArray!T)
+	static ref Type insert(ref Type record)
 	{
 		return relationProxy.insert(record);	
 	}
 
-	static Type insert(T)(Type records)
-		if (isArray!T)
+	static Type[] insert(Type[] records)
 	{
 		return relationProxy.insert(records);	
 	}
