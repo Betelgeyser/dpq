@@ -966,6 +966,7 @@ struct Connection
       c.exec("DROP TABLE update_object_test");
    }
 
+   // TODO: Combine insertR and insert into a single function?
    /**
       Inserts the given structure, returning whatever columns are specified by the
       second param as a normal Result.
@@ -978,47 +979,29 @@ struct Connection
       struct Data { @PK int id, int a; int b; }
       Data myData;
       auto result = c.insert(myData, "id");
+      Data[2] dataArray;
+      auto result = c.insert(dataArray, "id");
       -------------------
     */
-   Result insertR(T)(T val, string ret = "") if (!isArray!T)
+   Result insertR(T)(T val, string ret = "")
    {
-      QueryBuilder qb;
-      qb.insert(relationName!T, AttributeList!(T, true, true));
-      if (ret.length > 0)
-         qb.returning(ret);
-
-      qb.addValues!T(val);
-
-      return qb.query(this).run();
-   }
-
-   /**
-      Inserts the given array structures in a singl query, returning whatever columns are specified by the
-      second param as a normal Result.
-
-      Equivalent to specifying RETURNING at the end of the query.
-
-      Examples:
-      -------------------
-      Connection c; // an established connection
-      struct Data { @PK int id, int a; int b; }
-      Data[2] myData;
-      auto result = c.insert(myData, "id");
-      -------------------
-    */
-   Result insertR(T)(T vals, string ret = "") if (isArray!T)
-   {
+      enum IsRange = isInputRange!T;
       alias BT = BaseType!T;
 
-      if (!vals.length)
-         return Result.init;
+      static if (IsRange)
+         if (!val)
+            return Result.init;
 
       QueryBuilder qb;
       qb.insert(relationName!BT, AttributeList!(BT, true, true));
+
       if (ret.length > 0)
          qb.returning(ret);
 
-      foreach (val; vals)
+      static if (IsRange)
+         foreach (v; val)
+            qb.addValues!BT(v);
+      else
          qb.addValues!BT(val);
 
       return qb.query(this).run();
@@ -1033,51 +1016,36 @@ struct Connection
       struct User {@PK @serial int id; int a }
       User myUser;
       c.insert(myUser);
+      User[2] userArray;
+      c.insert(dataArray);
       ---------------
     */
-   bool insert(T)(T val, bool async = false) if (!isArray!T)
+   auto insert(T)(T val, bool async = false)
    {
-
-      QueryBuilder qb;
-      qb.insert(relationName!T, AttributeList!(T, true, true));
-      qb.addValues!T(val);
-
-      if (async)
-         return qb.query(this).runAsync();
-
-      auto r = qb.query(this).run();
-      return r.rows > 0;
-   }
-
-   /**
-      Inserts the given array of structures to the DB as one query
-
-      Examples:
-      ---------------
-      Connection c; // An established connection
-      struct User {@PK @serial int id; int a }
-      User[2] myUsers;
-      c.insert(myUsers);
-      ---------------
-    */
-   int insert(T)(T vals, bool async = false) if (isArray!T)
-   {
+      enum IsRange = isInputRange!T;
       alias BT = BaseType!T;
+
+      static if (IsRange)
+         if (!val)
+            return 0;
 
       QueryBuilder qb;
       qb.insert(relationName!BT, AttributeList!(BT, true, true));
 
-      if (!vals.length)
-         return 0;
-
-      foreach (val; vals)
+      static if (IsRange)
+         foreach (v; val)
+            qb.addValues!BT(v);
+      else
          qb.addValues!BT(val);
 
       if (async)
          return qb.query(this).runAsync();
 
       auto r = qb.query(this).run();
-      return r.rows;
+      static if (IsRange)
+         return r.rows;
+      else
+         return r.rows > 0;
    }
 
    unittest
