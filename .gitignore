@@ -20,7 +20,13 @@ dpq-test-library
 
 # Eclipse project files
 .project
+.settings
+
+# IntelliJ IDEA files
+.idea/
+dpq.iml
 
 # other
 .directory
 __test__library__
+*.orig
