@@ -17,8 +17,10 @@ import dpq.value;
 import dpq.serialisers.array;
 import dpq.serialisers.composite;
 
+import std.algorithm : each;
+import std.array : empty;
 import std.conv : to;
-import std.range : isInputRange;
+import std.range : back, isInputRange, popBack;
 import std.string : format, fromStringz, join, toStringz;
 import std.traits : hasUDA, isArray, FunctionTypeOf, isInstanceOf, getUDAs;
 import std.typecons : Nullable;
@@ -45,6 +47,7 @@ struct Connection
 
    private ConnectionPtr _connection;
    private PreparedStatement[string] _prepared;
+   private bool _isRunningTransaction;
 
    /**
       Connection constructor
@@ -118,6 +121,12 @@ struct Connection
    @property const(ushort) port()
    {
       return PQport(_connection).fromStringz.to!ushort;
+   }
+
+   /** Returns `true` if the current connection is running an unfinished transaction. */
+   @property bool isRunningTransaction() const @nogc @safe pure nothrow
+   {
+      return _isRunningTransaction;
    }
 
    /**
@@ -1424,12 +1433,14 @@ struct Connection
    /** Begins a transaction block. */
    void begin()
    {
+      scope(success) _isRunningTransaction = true;
       Query(this, "BEGIN").run();
    }
 
    /** Commits the current transaction. */
    void commit()
    {
+      scope(success) _isRunningTransaction = false;
       Query(this, "COMMIT").run();
    }
 
@@ -1471,6 +1482,7 @@ struct Connection
    */
    void rollback(Savepoint s = null)
    {
+      scope (success) if (s is null) _isRunningTransaction = false;
       auto q = Query(this, "ROLLBACK %s".format(s is null ? "" : "TO " ~ s.name));
       q.run();
    }
@@ -1494,6 +1506,8 @@ struct Connection
       t.id = r[0][0].as!int.get;
 
       c.begin();
+      assert(c.isRunningTransaction);
+
       t.t = "this value is ignored";
       c.update(t.id, t);
 
@@ -1508,9 +1522,11 @@ struct Connection
       assert(c.findOne!Test(t.id).get.t == "after savepoint s2");
 
       c.rollback(s2);
+      assert(c.isRunningTransaction);
       assert(c.findOne!Test(t.id).get.t == "before savepoint s2");
 
       c.rollback();
+      assert(!c.isRunningTransaction);
       assert(c.findOne!Test(t.id).get.t == "before transaction");
 
       Connection c2 = Connection("host=127.0.0.1 dbname=test user=test");
@@ -1522,6 +1538,7 @@ struct Connection
       assert(c2.findOne!Test(t.id).get.t == "before transaction");
 
       c.commit();
+      assert(!c.isRunningTransaction);
       assert(c.findOne!Test(t.id).get.t == "inside transaction");
       assert(c2.findOne!Test(t.id).get.t == "inside transaction");
 
@@ -1548,6 +1565,265 @@ struct Connection
          this.name = name;
       }
    }
+}
+
+/**
+   A pool that holds multiple connection instances to a given data source.
+
+   It is intended to increase performance of heavy loaded applications
+   performing lots of operation on the same database instance.
+
+   Note: async query execution is not tested, use with caution.
+*/
+class ConnectionPool
+{
+   /** Array of all connections of the pool. */
+   private Connection[] _conns;
+
+   /** Array of connections that has not been yet acquired from the pool. */
+   private Connection[] _freeConns;
+
+   /**
+      ConnectionPool constructor
+
+      Params:
+         connString = connection string
+         size = number of created connections
+
+      See Also:
+         https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING
+   */
+   this(string connString, uint size)
+   {
+      _freeConns.reserve(size);
+      foreach (_; 0..size)
+         _freeConns ~= Connection(connString);
+
+      _conns = _freeConns;
+   }
+
+   ///
+   unittest
+   {
+      writeln("\t * ConnectionPool");
+
+      auto pool = new ConnectionPool("host=127.0.0.1 dbname=test user=test", 2);
+      scope (exit) pool.closeAll();
+
+      assert(pool.size == 2);
+      assert(pool.countFree == 2);
+      assert(pool._conns == pool._freeConns);
+   }
+
+   /** Returns `true` if no free connections left. */
+   bool empty() @nogc @safe const pure nothrow
+   {
+      return _freeConns.empty;
+   }
+
+   /** Returns the total amount of connections provided by the pool. */
+   auto size() @nogc @safe const pure nothrow
+   {
+      return _conns.length;
+   }
+
+   /** Returns the number of free connections left. */
+   auto countFree() @nogc @safe const pure nothrow
+   {
+      return _freeConns.length;
+   }
+
+   /**
+      Acquires a connection from the pool.
+
+      Throws: DPQException if there is no free connections.
+
+      Returns: an instance of PooledConnection that holds a pointer to acquired connection.
+   */
+   PooledConnection acquire()
+   {
+      if (empty)
+         throw new DPQException("ConnectionPool is out of connections");
+
+      Connection* conn;
+      synchronized (this)
+      {
+         conn = &_freeConns.back;
+         _freeConns.popBack();
+      }
+      return PooledConnection(this, conn);
+   }
+
+   ///
+   unittest
+   {
+      writeln("\t\t * acquire");
+
+      auto pool = new ConnectionPool("host=127.0.0.1 dbname=test user=test", 2);
+      scope (exit) pool.closeAll();
+
+      auto conns = [ pool.acquire(), pool.acquire() ];
+      assert(pool.empty);
+      assert(conns[0] != conns[1]);
+
+      assert(conns[0].status == CONNECTION_OK);
+      assert(conns[1].status == CONNECTION_OK);
+
+      assert(conns[0]._pool == pool);
+      assert(conns[1]._pool == pool);
+   }
+
+   /** Closes all connections even those been acquired. */
+   void closeAll()
+   {
+      _conns.each!"a.close()";
+   }
+
+private:
+   /** Proxy struct that holds a pointer to a connection acquired from the pool. */
+   struct PooledConnection
+   {
+      alias connection this;
+
+      /** Reference to the controlling pool. */
+      private ConnectionPool _pool;
+
+      /** Real connection managed by the pool. */
+      private Connection* _connection;
+
+      @disable this();
+
+      /**
+         Connections created by the pool are not intended to be used outside of that pool.
+         Acquired pool should either be passed by reference or released and acquired again in another place.
+
+         Example:
+         --------------------
+         // Thread 1
+         auto c1 = pool.acquire();
+         auto c2 = c1;
+         c1.release();
+
+         // Thread 2
+         auto c = pool.acquire();
+
+         // Now c2 and c may hold a pointer to the same connection. If both threads execute queries on c and c2
+         // at the same time, it most probably will result in an error.
+
+         // Note, that connection still can be copied by copying the connection directly, though discourage.
+         Connection conn = c;
+         --------------------
+       */
+      @disable this(this);
+
+      /**
+         PooledConnection constructor
+
+         Params:
+            pool = pool owning the connection
+            conn = pointer to managed connection
+      */
+      this(ConnectionPool pool, Connection* conn)
+      {
+         _pool = pool;
+         _connection = conn;
+      }
+
+      /** Returns a reference to the managed connection. */
+      ref Connection connection()
+      {
+         return *_connection;
+      }
+
+      /**
+         Releases an acquired connection and returns it back to the pool.
+
+         If the connection is running an unfinished transaction, it will be rolled back.
+      */
+      void release()
+      in (_connection !is null, __FUNCTION__ ~ " called on null connection")
+      {
+         if (_connection.isRunningTransaction)
+            _connection.rollback();
+
+         _pool._release(this);
+      }
+
+      ///
+      unittest
+      {
+         import std.algorithm : all;
+         writeln("\t\t * release");
+
+         import std.algorithm : each;
+
+         auto pool = new ConnectionPool( "host=127.0.0.1 dbname=test user=test", 2);
+         scope (exit) pool.closeAll();
+
+         auto conns = [ pool.acquire(), pool.acquire() ];
+         assert(pool.countFree == 0);
+
+         conns[0].begin();
+         assert(conns[0].isRunningTransaction);
+
+         conns.each!"a.release()";
+         assert(pool.countFree == 2);
+         assert(pool._conns.all!((ref c) => !c._isRunningTransaction));
+      }
+
+      /**
+         Connections acquired from the connection pool should not be closed individually.
+         Use ConnectionPool.closeAll() to close all connections.
+      */
+      void close()
+      {
+         assert(0, "Connections instantiated from a pool are not allowed to be closed individually."
+            ~ " Use ConnectionPool.closeAll() instead");
+      }
+   }
+
+   /** Simply adds `pConn` to the array of free connections. No running transactions check is performed. */
+   void _release(ref PooledConnection pConn)
+   in (pConn._pool == this, "Must not release connections created outside the pool")
+   {
+      synchronized (this) _freeConns ~= *pConn._connection;
+   }
+}
+
+///
+unittest
+{
+   writeln("\t * ConnectionPool");
+
+   import std.array : array;
+   import std.parallelism : taskPool;
+   import std.range : repeat;
+
+   @relation("pool_test")
+   struct Test
+   {
+      @PK @serial int id;
+      string str;
+      this(string s) { str = s; }
+   }
+
+   c.ensureSchema!Test;
+
+   // Connection pool may be used for parallel tasks
+   auto pool = new ConnectionPool("host=127.0.0.1 dbname=test user=test", 2);
+
+   auto tests = Test("some name").repeat(100).array;
+   foreach(ref t; taskPool.parallel(tests, 50))
+   {
+      auto conn = pool.acquire();
+      scope (exit) conn.release();
+
+      conn.insert(t);
+   }
+   assert(c.count!Test() == 100);
+
+   c.exec("DROP TABLE pool_test");
+   pool.closeAll();
 }
 
 /**
