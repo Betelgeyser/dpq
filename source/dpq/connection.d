@@ -1434,10 +1434,7 @@ struct Connection
    */
    void commit()
    {
-      import dpq.query;
-
-      auto q = Query(this, "COMMIT");
-      q.run();
+      Query(this, "COMMIT").run();
    }
 
    /**
@@ -1450,10 +1447,8 @@ struct Connection
    */
    Savepoint savepoint(string name)
    {
-      import dpq.query;
-
       Savepoint s = new Savepoint(name);
-      auto q = Query(this, "SAVEPOINT " ~ s.name);
+      auto q = Query(this, "SAVEPOINT %s".format(s.name));
       q.run();
 
       return s;
@@ -1467,9 +1462,7 @@ struct Connection
    */
    void releaseSavepoint(Savepoint s)
    {
-      import dpq.query;
-
-      auto q = Query(this, "RELEASE SAVEPOINT " ~ s.name);
+      auto q = Query(this, "RELEASE SAVEPOINT %s".format(s.name));
       q.run();
    }
 
@@ -1482,15 +1475,7 @@ struct Connection
    */
    void rollback(Savepoint s = null)
    {
-      import dpq.query;
-
-      auto q = Query(this);
-
-      if (s is null)
-         q.command = "ROLLBACK";
-      else
-         q.command = "ROLLBACK TO " ~ s.name;
-
+      auto q = Query(this, "ROLLBACK %s".format(s is null ? "" : "TO " ~ s.name));
       q.run();
    }
 
